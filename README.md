@@ -1,5 +1,9 @@
 # philgeps-ml-project
-Predicting which PhilGEPS public biddings end without a contract: an ML risk score to help suppliers decide which government tenders to bid on
+Predicting the likelihood of procurement failure for PhilGEPS public biddings: a notice-level risk score, estimated from information available when the bid notice is published.
+
+The model estimates whether a published procurement notice is likely to end in a **failed bidding** rather than an award. It is intended for risk screening and review prioritisation by agencies, oversight bodies and analysts. It is **not** a model of whether a particular supplier will win a contract, and it does not recommend which bids suppliers should pursue.
+
+Outcome definition (one record per `Bid Reference No.`): `Target_Failed = 1` when every line item of the bid is `Failed`, `0` when every line item is `Awarded`. Bids that are `Active`, `Closed`, `Cancelled`, `Shortlisted`, missing or conflicting are left unlabelled and excluded from supervised modelling; they are **not** treated as failures. Only fields that exist at publication are used as predictors; award and contract fields are excluded.
 
 ## Dataset
 
@@ -57,10 +61,36 @@ df_2026_v15 = pd.read_csv("data/raw/1.5_2026_Q1.csv", **cp1252, **kw)
 df_2026_v20 = pd.read_csv("data/raw/2.0_2026_Q1.csv", **kw)
 ```
 
-## Notebooks
+## Combined dataset
 
-- [`data_exploration/2.0 and 1.5 Data Exploration.ipynb`](data_exploration/2.0%20and%201.5%20Data%20Exploration.ipynb): data analysis pipeline that reads every file in `data/raw/`, merges them, drops duplicate rows, and checks missing values
-- [`philgeps_dataset_initial_analysis.ipynb`](philgeps_dataset_initial_analysis.ipynb) and [`philgeps_dataset_initial_analysis_updated.ipynb`](philgeps_dataset_initial_analysis_updated.ipynb): consolidate every CSV in `data/raw/` into one DataFrame and profile fields, data types, missing values and distributions
-- [`LT8-ML_Govt_Bidding_Documented.ipynb`](LT8-ML_Govt_Bidding_Documented.ipynb): data preparation, exploratory analysis and failure-risk modelling for Public Bidding (written for the earlier 14-file set, 2023 Q1 to 2026 Q2)
+[`scripts/combine_raw.py`](scripts/combine_raw.py) reads the 15 `1.5_*` files and the three `2.0_2026_*` files, repairs the shifted columns in `1.5_2025_Q4.csv`, maps the three column layouts onto the 1.5 (2023–2025) column names, harmonises spelling-only differences (statuses, `Region`, `Classification`, duration units) and writes one Parquet file:
 
-The notebooks that read every file in `data/raw/` will pick up the duplicate `2.0_2023_*` to `2.0_2025_*` files. Exclude them or deduplicate after loading.
+```bash
+python scripts/combine_raw.py      # from the repository root; about 15 minutes
+# -> data/processed/philgeps_combined.parquet  (6,059,201 line items, about 420 MB)
+```
+
+Every row keeps `Source System` (`1.5` or `2.0`), `Source File` and `Source Quarter`, so it can be traced back to its raw file. The raw files are never modified. `data/processed/` is ignored by Git; rebuild the file locally instead of committing it.
+
+Values that genuinely differ between the systems are left as they are: `Business Category`, `Funding Source` and `Award Notice Status` use different vocabularies in PhilGEPS 2.0. Split by `Source System` before comparing them. The 1.5 and 2.0 exports for 2026 contain different notices (no shared bid references), so both are kept.
+
+Bid-level counts from the combined data (Public Bidding only, after 259 bids were excluded for data-quality reasons): 1,277,213 bids, of which 504,350 are Awarded and 69,235 Failed (573,585 labelled, 12.1% failed). The other 703,628 are unlabelled (`Closed`, `Active`, `Cancelled`, `Shortlisted`, `Concluded`).
+
+## Analysis notebooks
+
+The analytical roadmap runs in three notebooks in [`notebooks/`](notebooks/), which share their definitions through [`notebooks/procurement_failure.py`](notebooks/procurement_failure.py). Run them in order after `scripts/combine_raw.py`. They write their outputs (the bid table, models and metrics) to `data/processed/`, which Git ignores.
+
+| Notebook | Roadmap steps | Contents |
+|---|---|---|
+| [`01_data_preparation_and_eda.ipynb`](notebooks/01_data_preparation_and_eda.ipynb) | 1–5 | Source inventory and duplicate check, raw layouts, procurement modes and statuses, unit of observation, 2025 Q4 repair check, harmonisation, consolidation, bid-level table with exception log, outcome rule, label coverage, field availability, class balance |
+| [`02_modeling.ipynb`](notebooks/02_modeling.ipynb) | 6 | Random 70/15/15 split of the merged bid table (stratified by outcome and system), baselines, 4 models × 2 feature sets (LT8's original 5, then expanded), calibration, test evaluation, sensitivity with cancellations counted as failures |
+| [`03_diagnostics_and_interpretation.ipynb`](notebooks/03_diagnostics_and_interpretation.ipynb) | 7–9 | Out-of-time check (train 2023–2024, test 2025/2026 by system), drift, segment performance, label coverage, permutation importance, budget and classification patterns, review-queue simulation, findings |
+
+Headline result: gradient boosting on the expanded at-publication features reaches test ROC-AUC 0.84 and PR-AUC 0.50 (random ranking: 0.12). Reviewing the 10% of notices with the highest predicted risk would catch 42% of failed biddings, at 4.2 times the random hit rate.
+
+## Other notebooks
+
+- [`philgeps_dataset_initial_analysis_updated.ipynb`](philgeps_dataset_initial_analysis_updated.ipynb): loads the combined dataset, profiles every field, defines the bid-level outcome (how ongoing, closed and cancelled notices are handled, class balance by system and year), classifies fields by availability at publication, and charts every low-cardinality field. Run `scripts/combine_raw.py` first.
+- [`LT8-ML_Govt_Bidding_Documented.ipynb`](LT8-ML_Govt_Bidding_Documented.ipynb): the original run of the roadmap on the earlier 14-file set (2023 Q1 to 2026 Q2), kept as a record. Its header gives the procurement-failure framing and answers the reviewer's questions with current numbers, and its last cell points to the `notebooks/` series.
+- [`philgeps_dataset_initial_analysis.ipynb`](philgeps_dataset_initial_analysis.ipynb): earlier version of the initial analysis, kept for reference. It reads the raw CSVs directly with the old file names.
+- [`data_exploration/2.0 and 1.5 Data Exploration.ipynb`](data_exploration/2.0%20and%201.5%20Data%20Exploration.ipynb): exploration pipeline on the combined dataset: source summary, exact-duplicate rows, missing values, count plots of selected fields (saved to `data/processed/figures/`), and data-scoping notes.
