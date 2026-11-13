@@ -42,11 +42,16 @@ SPLITS = PROCESSED / "split_assignment.parquet"
 RANDOM_STATE = 42
 KEY = ["Source System", "Bid Reference No."]
 
+# Study window: 2023 Q1 to 2026 Q2 (Source Quarter of the raw file). 2026 Q3 is left out.
+STUDY_QUARTERS = [f"{y}Q{q}" for y in range(2023, 2027) for q in range(1, 5) if (y, q) <= (2026, 2)]
+
 # --------------------------------------------------------------------------
 # Outcome rule
 # --------------------------------------------------------------------------
-STATUS_ORDER = ["Awarded", "Failed", "Closed", "Cancelled", "Active", "Shortlisted",
+STATUS_ORDER = ["Awarded", "Failed", "Cancelled", "Active", "Shortlisted",
                 "Concluded", "Conflicting", "(missing)"]
+# Bids with these statuses are removed from the bid table altogether.
+REMOVED_STATUSES = ["Closed"]
 
 
 def bid_status(items: pd.DataFrame) -> pd.Series:
@@ -65,13 +70,13 @@ def bid_status(items: pd.DataFrame) -> pd.Series:
 
 
 def target_failed(status: pd.Series) -> pd.Series:
-    """Main target: 1 = Failed, 0 = Awarded, NaN = unlabelled (everything else)."""
-    return status.map({"Failed": 1.0, "Awarded": 0.0})
-
-
-def target_failed_or_cancelled(status: pd.Series) -> pd.Series:
-    """Sensitivity target: 1 = Failed or Cancelled, 0 = Awarded, NaN = unlabelled."""
+    """Main target (procurement failure): 1 = Failed or Cancelled, 0 = Awarded, NaN = unlabelled."""
     return status.map({"Failed": 1.0, "Cancelled": 1.0, "Awarded": 0.0})
+
+
+def target_failed_only(status: pd.Series) -> pd.Series:
+    """Sensitivity target: 1 = Failed, 0 = Awarded, NaN = everything else (Cancelled included)."""
+    return status.map({"Failed": 1.0, "Awarded": 0.0})
 
 
 # --------------------------------------------------------------------------
@@ -92,11 +97,14 @@ STRICT_FIELDS = ["Business Category", "Region", "Classification"]
 DAYS_PER_UNIT = {"Day/s": 1, "Month/s": 30, "Year/s": 365}
 
 
+STUDY_FILTER = [("Source Quarter", "in", STUDY_QUARTERS)]
+
+
 def load_public_bidding_items(columns: list[str] | None = None) -> pd.DataFrame:
-    """Public Bidding line items from the combined file (filter applied while reading)."""
+    """Public Bidding line items from the study window (filters applied while reading)."""
     columns = columns or ITEM_COLUMNS
     table = pq.read_table(COMBINED, columns=columns,
-                          filters=[("Procurement Mode (Grouped)", "=", "Public Bidding")])
+                          filters=[("Procurement Mode (Grouped)", "=", "Public Bidding")] + STUDY_FILTER)
     text = [c for c in columns if str(table.schema.field(c).type) == "string" and c != "Bid Reference No."]
     return table.to_pandas(categories=text)
 
@@ -110,7 +118,8 @@ def build_bid_table(items: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Aggregate line items to one row per bid.
 
     Returns (bids, exceptions). `bids` holds every bid that passed the quality rules,
-    labelled or not. `exceptions` lists excluded bids with the reason.
+    labelled or not, except bids with a status in REMOVED_STATUSES (Closed), which are
+    dropped before the quality rules. `exceptions` lists excluded bids with the reason.
     """
     items = items.dropna(subset=["Bid Reference No."]).copy()
     duration_days = items["Contract Duration"] * items["Calendar Type"].astype("string").map(DAYS_PER_UNIT).astype(float)
@@ -145,6 +154,7 @@ def build_bid_table(items: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
         bids[c] = first
 
     bids = bids.reset_index()
+    bids = bids[~bids["status"].isin(REMOVED_STATUSES)].reset_index(drop=True)
 
     # Quality rules -> exceptions log.
     reasons = pd.Series("", index=bids.index)
@@ -176,9 +186,9 @@ def build_bid_table(items: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     bids["multi_funding_source"] = (bids["Funding Source (versions)"] > 1).astype(int)
 
     bids["Target_Failed"] = target_failed(bids["status"])
-    bids["Target_Failed_or_Cancelled"] = target_failed_or_cancelled(bids["status"])
+    bids["Target_Failed_Only"] = target_failed_only(bids["status"])
 
-    keep = (KEY + ["source_quarter", "status", "Target_Failed", "Target_Failed_or_Cancelled",
+    keep = (KEY + ["source_quarter", "status", "Target_Failed", "Target_Failed_Only",
                    "approved_budget", "log_approved_budget", "published_date", "published_year",
                    "published_month", "published_dayofweek", "closing", "bidding_window_days",
                    "n_line_items", "log_n_line_items", "contract_duration_days",
