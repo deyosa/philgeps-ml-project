@@ -12,6 +12,8 @@ column shift, drops exact duplicate rows (which also removes the 2.0_2023-2025
 copies of the 1.5 files) and drops Closed rows. This script finishes the
 harmonisation that the models need:
 
+  * Repairs text that notebook 00 decoded as Latin-1 instead of Windows-1252
+    (1.5_2025_Q4.csv), e.g. 'Multi\\x96Purpose' -> 'Multi–Purpose'.
   * Adds Source System. A row is PhilGEPS 2.0 when Lot Type is filled; only the
     2.0 layout has that column, and it is filled on every 2.0 row.
   * Merges column pairs that hold the same field under the 2026 names
@@ -66,9 +68,29 @@ MERGE_PAIRS = [
 ]
 ID_COLS = ["Bid Reference No.", "Award Reference No.", "UNSPSC Code", "Line Item No", "Awardee OrgID"]
 DATE_FORMATS = ["%d/%m/%Y", "%d-%b-%Y", "%d-%b-%Y %I:%M %p"]
+# Notebook 00 decodes the Windows-1252 file 1.5_2025_Q4.csv as Latin-1, which turns characters such as the
+# en dash (byte 0x96) into invisible control characters (U+0080-U+009F). Those never occur in genuine text.
+C1_CONTROLS = "[\u0080-\u009f]"
+
+
+def fix_cp1252(text):
+    """Re-decode a string that was read as Latin-1 but written as Windows-1252."""
+    try:
+        return text.encode("latin-1").decode("cp1252")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return text
+
+
+def repair_encoding(df: pd.DataFrame, stats: dict) -> None:
+    for c in df.columns:
+        mask = df[c].str.contains(C1_CONTROLS, regex=True, na=False)
+        if mask.any():
+            df.loc[mask, c] = df.loc[mask, c].map(fix_cp1252)
+            stats["encoding_fixed"][c] = stats["encoding_fixed"].get(c, 0) + int(mask.sum())
 
 
 def transform(df: pd.DataFrame, stats: dict) -> pd.DataFrame:
+    repair_encoding(df, stats)
     is20 = df["Lot Type"].notna()
     df["Source System"] = is20.map({True: "2.0", False: "1.5"})
 
@@ -118,7 +140,7 @@ def main() -> None:
                  "or copy the cleaned CSV there.")
     OUT.parent.mkdir(parents=True, exist_ok=True)
     tmp = OUT.with_suffix(".parquet.tmp")
-    stats = {"merge_conflicts": {}, "bad_dates": {}, "bad_numbers": {}}
+    stats = {"merge_conflicts": {}, "bad_dates": {}, "bad_numbers": {}, "encoding_fixed": {}}
     counts: dict[tuple[str, str], int] = {}
     n = 0
     with pq.ParquetWriter(tmp, SCHEMA, compression="zstd") as writer:
@@ -137,6 +159,9 @@ def main() -> None:
         print(f"  {system}  {s:<12} {v:>10,}")
     print("\nMerged column pairs with conflicting values (target kept):")
     for c, v in stats["merge_conflicts"].items():
+        print(f"  {c:<32} {v:>8,}")
+    print("\nText re-decoded from Latin-1 to Windows-1252 (values):")
+    for c, v in stats["encoding_fixed"].items():
         print(f"  {c:<32} {v:>8,}")
     print("\nValues that could not be parsed (left empty):")
     for kind in ("bad_dates", "bad_numbers"):

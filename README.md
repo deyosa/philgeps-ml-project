@@ -3,7 +3,7 @@ Predicting the likelihood of procurement failure for PhilGEPS public biddings: a
 
 The model estimates whether a published procurement notice is likely to end in a **failed bidding or a cancellation** rather than an award. It is intended for risk screening and review prioritisation by agencies, oversight bodies and analysts. It is **not** a model of whether a particular supplier will win a contract, and it does not recommend which bids suppliers should pursue.
 
-Outcome definition (one record per `Bid Reference No.`): `Target_Failed = 1` when every line item of the bid is `Failed` or every line item is `Cancelled`, and `0` when every line item is `Awarded`. Bids whose status is `Closed` are **removed** from the data. Bids that are `Active`, `Shortlisted`, `Concluded`, missing or conflicting are left unlabelled and excluded from supervised modelling. Only fields that exist at publication are used as predictors; award and contract fields are excluded.
+Outcome definition (one record per `Bid Reference No.`): `Target_Failed = 1` when every line item of the bid is `Failed` or every line item is `Cancelled`, and `0` when every line item is `Awarded`. Bids whose status is `Closed` are **removed** from the data. Bids that are `Active`, `Shortlisted`, `Concluded`, missing or conflicting are left unlabelled and excluded from supervised modelling. Bids published in 2025 Q3–Q4 are also left out of training and evaluation: award records for those quarters are largely missing from the PhilGEPS 1.5 exports, so their labels lean towards cancellations. Only fields that exist at publication are used as predictors; award and contract fields are excluded.
 
 Study window: **2023 Q1 to 2026 Q2**. The 2026 Q3 files are in `data/raw/`, but the cleaning notebook does not read them.
 
@@ -70,7 +70,7 @@ The project runs in four steps, from the repository root:
 | Step | What | Output |
 |---|---|---|
 | 0 | [`notebooks/00_data_cleaning.ipynb`](notebooks/00_data_cleaning.ipynb): reads the 28 raw files from 2023 Q1 to 2026 Q2, repairs the 2025 Q4 column shift, renames the 2.0 headers, merges everything, and drops exact duplicate rows and `Closed` rows | `data/raw/cleaned_data/PhilGeps_Cleaned.csv` (2,093,210 line items, 1.6 GB). **This is the main dataset.** |
-| 1 | `python scripts/harmonise_cleaned.py` (about 1 minute): adds `Source System`, merges the columns that carry 2026 names (`Procurement Category` → `Business Category`, `Source of Funds` → `Funding Source`, `Delivery Period` → `Contract Duration`, ...), maps 2.0 statuses, `Region` and `Classification` spellings, splits durations, parses dates and amounts | `data/processed/philgeps_cleaned.parquet` (about 220 MB) |
+| 1 | `python scripts/harmonise_cleaned.py` (about 1 minute): repairs 2025 Q4 text that notebook 00 decodes as Latin-1 instead of Windows-1252, adds `Source System`, merges the columns that carry 2026 names (`Procurement Category` → `Business Category`, `Source of Funds` → `Funding Source`, `Delivery Period` → `Contract Duration`, ...), maps 2.0 statuses, `Region` and `Classification` spellings, splits durations, parses dates and amounts | `data/processed/philgeps_cleaned.parquet` (about 220 MB) |
 | 2–4 | Analysis notebooks 01–03 (below) | bid table, models and metrics in `data/processed/` |
 | 5 | [`notebooks/04_project_summary.ipynb`](notebooks/04_project_summary.ipynb): auto-updating summary (problem, methodology, key findings, business applications) built from the outputs of steps 0–4 | the summary itself |
 
@@ -82,9 +82,11 @@ The exact-duplicate step removes 5,868,193 rows: every row of the twelve `2.0_20
 
 Values that genuinely differ between the systems are left as they are: `Business Category`, `Funding Source` and `Award Notice Status` use different vocabularies in PhilGEPS 2.0. Split by `Source System` before comparing them. The 1.5 and 2.0 exports for 2026 contain different notices (no shared bid references), so both are kept.
 
+[`data/reference/public_bidding_notices_per_year.csv`](data/reference/public_bidding_notices_per_year.csv) holds the yearly number of Public Bidding notices **including** those that end `Closed`. The cleaned data cannot provide it, since Closed rows are removed. Notebook 04 sizes its review-capacity scenarios on it and refreshes it whenever `data/processed/philgeps_combined.parquet` (below) exists.
+
 [`scripts/combine_raw.py`](scripts/combine_raw.py) is an independent cross-check. It builds the line items straight from the raw files, keeping `Source File` and `Source Quarter` (`data/processed/philgeps_combined.parquet`, about 15 minutes). Restricted to 2023 Q1–2026 Q2 with `Closed` rows and exact duplicates removed, it gives the same 2,093,210 line items as the cleaned CSV. Bid by bid, statuses, budgets, dates and categories agree. The two harmonisation steps share their value mappings.
 
-Bid-level counts used for modelling (Public Bidding only, 2023 Q1 to 2026 Q2): the cleaned data holds 630,023 bids (568,505 `Closed` bids are already removed); 102 are excluded for data-quality reasons, leaving 629,921. Of these, 615,398 are labelled: 492,283 Awarded (0) and 123,115 Failed or Cancelled (1; 66,250 Failed and 56,865 Cancelled), a 20.0% failure rate. The other 14,523 are unlabelled (`Active`, `Shortlisted`, `Concluded`).
+Bid-level counts used for modelling (Public Bidding only, 2023 Q1 to 2026 Q2): the cleaned data holds 630,023 bids (568,505 `Closed` bids are already removed); 102 are excluded for data-quality reasons, leaving 629,921, of which 615,398 are labelled. Leaving out the 35,178 labelled bids from 2025 Q3–Q4, the modelling population is 580,220: 469,283 Awarded (0) and 110,937 Failed or Cancelled (1; 61,590 Failed and 49,347 Cancelled), a 19.1% failure rate.
 
 ## Analysis notebooks
 
@@ -92,12 +94,12 @@ The analytical roadmap runs in three notebooks in [`notebooks/`](notebooks/), wh
 
 | Notebook | Roadmap steps | Contents |
 |---|---|---|
-| [`01_data_preparation_and_eda.ipynb`](notebooks/01_data_preparation_and_eda.ipynb) | 1–5 | Source inventory and duplicate check, raw layouts, procurement modes and statuses, unit of observation, 2025 Q4 repair check, harmonisation, consolidation, bid-level table with exception log, outcome rule, label coverage, field availability, class balance |
-| [`02_modeling.ipynb`](notebooks/02_modeling.ipynb) | 6 | Random 70/15/15 split of the merged bid table (stratified by outcome and system), baselines, 4 models × 2 feature sets (LT8's original 5, then expanded), calibration, test evaluation with confusion matrices (top-10% and 0.5 cutoffs), sensitivity with only failed biddings counted as failures |
+| [`01_data_preparation_and_eda.ipynb`](notebooks/01_data_preparation_and_eda.ipynb) | 1–5 | Source inventory and duplicate check, raw layouts, procurement modes and statuses, unit of observation, 2025 Q4 repair check, harmonisation, consolidation, bid-level table with exception log, outcome rule, label coverage and the 2025 Q3–Q4 exclusion, field availability, class balance, re-advertised notices |
+| [`02_modeling.ipynb`](notebooks/02_modeling.ipynb) | 6 | Random 70/15/15 split of the merged bid table by notice group (re-advertisements stay together; stratified by outcome and system), baselines, 4 models × 2 feature sets (LT8's original 5, then expanded), calibration, test evaluation with confusion matrices (top-10% and 0.5 cutoffs), sensitivity with only failed biddings counted as failures, and with 2025 Q3–Q4 added back |
 | [`03_diagnostics_and_interpretation.ipynb`](notebooks/03_diagnostics_and_interpretation.ipynb) | 7–9 | Out-of-time check (train 2023–2024, test 2025/2026 by system), drift, segment performance, label coverage, permutation importance, budget and classification patterns, review-queue simulation, findings; saves the diagnostics for notebook 04 |
 | [`04_project_summary.ipynb`](notebooks/04_project_summary.ipynb) | summary | Problem, data funnel, methodology, key findings with charts, review-capacity scenarios and business applications, limitations. No hand-typed results: everything is computed from the saved outputs of 00–03 |
 
-Headline result: gradient boosting on the expanded at-publication features reaches test ROC-AUC 0.77 and PR-AUC 0.50 (random ranking: 0.20). Reviewing the 10% of notices with the highest predicted risk would catch 30% of failed or cancelled procurements, at 3.0 times the random hit rate. Counting only failed biddings (Cancelled left out) gives ROC-AUC 0.83.
+Headline result: gradient boosting on 19 at-publication features, including the re-advertisement history of each notice, reaches test ROC-AUC 0.77 and PR-AUC 0.52 (random ranking: 0.19). Reviewing the 10% of notices with the highest predicted risk would catch 32% of failed or cancelled procurements, at 3.2 times the random hit rate. Counting only failed biddings (Cancelled left out) gives ROC-AUC 0.84.
 
 ## Other notebooks
 

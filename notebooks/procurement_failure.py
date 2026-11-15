@@ -55,6 +55,11 @@ STATUS_ORDER = ["Awarded", "Failed", "Cancelled", "Active", "Shortlisted",
                 "Concluded", "Conflicting", "(missing)"]
 # Bids with these statuses are removed from the bid table altogether.
 REMOVED_STATUSES = ["Closed"]
+# Publication quarters whose outcomes are incomplete in the PhilGEPS 1.5 exports: award records are missing
+# (Awarded 13-16% of bids vs about 45% elsewhere; Closed bids carry no award details), so their labelled bids
+# are skewed towards cancellations. They stay in the bid table for descriptive use but are left out of
+# model training and evaluation (`in_model_scope` = False). Notebook 02 §6.11 tests including them.
+INCOMPLETE_QUARTERS = ["2025Q3", "2025Q4"]
 
 
 def bid_status(items: pd.DataFrame) -> pd.Series:
@@ -91,7 +96,9 @@ ITEM_COLUMNS = [
     "Contract Duration", "Calendar Type", "Business Category", "Funding Source",
     "Funding Instrument", "Trade Agreement", "Region", "Classification",
     "PE Organization Type (Grouped)", "Government Branch", "Lot Type",
+    "Procuring Entity (PE)", "Notice Title",
 ]
+PREVIOUS_ATTEMPT = {"Failed": "Failed", "Cancelled": "Cancelled", "Awarded": "Awarded"}  # anything else: no outcome yet
 CATEGORY_FIELDS = ["Business Category", "Funding Source", "Funding Instrument", "Trade Agreement",
                    "Region", "Classification", "PE Organization Type (Grouped)", "Government Branch",
                    "Lot Type"]
@@ -114,6 +121,53 @@ def _mode(s: pd.Series):
     return s.mode().iloc[0] if len(s) else np.nan
 
 
+def notice_group(bids: pd.DataFrame) -> pd.Series:
+    """Key shared by repeat notices: same procuring entity, title (normalised) and approved budget.
+
+    A failed or cancelled procurement is usually re-advertised under a new bid reference with the same
+    entity, title and budget. Bids missing any of the three parts form a group of their own.
+    """
+    pe = bids["pe"].astype("string").str.upper().str.strip()
+    title = bids["title"].astype("string").str.upper().str.replace(r"\s+", " ", regex=True).str.strip()
+    budget = bids["budget_max"].round(0).astype("Int64").astype("string")
+    own = bids["Source System"].astype(str) + "#" + bids["Bid Reference No."].astype(str)
+    return (pe + "|" + title + "|" + budget).fillna(own).astype(str)
+
+
+def add_prior_attempts(bids: pd.DataFrame) -> pd.DataFrame:
+    """Re-advertisement history, using only notices published strictly before each bid.
+
+    n_prior_attempts: earlier notices in the same group.
+    previous_attempt: outcome of the most recent earlier notice (Failed, Cancelled, Awarded,
+    'No outcome yet'), or 'First notice'.
+    """
+    pub = bids["published_min"]
+    bids["n_prior_attempts"] = (bids.assign(_pub=pub).groupby("notice_group")["_pub"].rank(method="min") - 1).fillna(0)
+    # One row per (group, publication date) block; the previous block holds the latest strictly-earlier notice.
+    blocks = (bids.dropna(subset=["published_min"]).sort_values(["notice_group", "published_min", "Bid Reference No."])
+              .groupby(["notice_group", "published_min"], sort=False)["status"].last().reset_index())
+    blocks["previous_attempt"] = blocks.groupby("notice_group")["status"].shift()
+    bids = bids.merge(blocks[["notice_group", "published_min", "previous_attempt"]], on=["notice_group", "published_min"], how="left")
+    prev = bids["previous_attempt"]
+    bids["previous_attempt"] = np.where(prev.isna(), "First notice", prev.map(PREVIOUS_ATTEMPT).fillna("No outcome yet"))
+    return bids
+
+
+def grouped_split(frame: pd.DataFrame, target: str, seed: int = RANDOM_STATE) -> pd.Series:
+    """70/15/15 train/validation/test split that keeps each notice group in one set.
+
+    Stratified by outcome x source system (taken from each group's first bid; most groups are a single bid).
+    Groups are shuffled and dealt round-robin into 20 folds within each stratum: 14 train, 3 validation, 3 test.
+    """
+    strata = frame[target].astype(int).astype(str) + "_" + frame["Source System"].astype(str)
+    groups = pd.DataFrame({"stratum": strata.groupby(frame["notice_group"]).first()})
+    groups["r"] = np.random.default_rng(seed).random(len(groups))
+    groups = groups.sort_values(["stratum", "r"])
+    groups["fold"] = groups.groupby("stratum").cumcount() % 20
+    folds = frame["notice_group"].map(groups["fold"]).to_numpy()
+    return pd.Series(np.select([folds < 14, folds < 17], ["train", "validation"], "test"), index=frame.index)
+
+
 def build_bid_table(items: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Aggregate line items to one row per bid.
 
@@ -134,6 +188,8 @@ def build_bid_table(items: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
         closing=("Closing Date", "max"),
         n_line_items=("Bid Notice Status", "size"),
         contract_duration_days=("duration_days", "max"),
+        pe=("Procuring Entity (PE)", "first"),
+        title=("Notice Title", "first"),
     )
     bids = bids.join(bid_status(items))
 
@@ -157,6 +213,12 @@ def build_bid_table(items: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     pub = bids["published_min"]
     bids["published_quarter"] = (pub.dt.year.astype("Int64").astype("string") + "Q"
                                  + pub.dt.quarter.astype("Int64").astype("string"))
+    bids["in_model_scope"] = ~bids["published_quarter"].isin(INCOMPLETE_QUARTERS)
+
+    # Re-advertisement history (computed on every non-Closed bid, before the quality exclusions,
+    # so earlier attempts count even when they are later excluded or unlabelled).
+    bids["notice_group"] = notice_group(bids)
+    bids = add_prior_attempts(bids)
 
     # Quality rules -> exceptions log.
     reasons = pd.Series("", index=bids.index)
@@ -190,7 +252,8 @@ def build_bid_table(items: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     bids["Target_Failed"] = target_failed(bids["status"])
     bids["Target_Failed_Only"] = target_failed_only(bids["status"])
 
-    keep = (KEY + ["published_quarter", "status", "Target_Failed", "Target_Failed_Only",
+    keep = (KEY + ["published_quarter", "in_model_scope", "notice_group", "n_prior_attempts", "previous_attempt",
+                   "status", "Target_Failed", "Target_Failed_Only",
                    "approved_budget", "log_approved_budget", "published_date", "published_year",
                    "published_month", "published_dayofweek", "closing", "bidding_window_days",
                    "n_line_items", "log_n_line_items", "contract_duration_days",
@@ -206,10 +269,10 @@ ORIGINAL_NUMERIC = ["log_approved_budget"]
 ORIGINAL_CATEGORICAL = ["Funding Source", "Business Category", "Region", "published_month"]
 
 EXPANDED_NUMERIC = ORIGINAL_NUMERIC + ["bidding_window_days", "log_n_line_items",
-                                       "log_contract_duration_days", "multi_funding_source"]
+                                       "log_contract_duration_days", "multi_funding_source", "n_prior_attempts"]
 EXPANDED_CATEGORICAL = ORIGINAL_CATEGORICAL + [
     "Classification", "PE Organization Type (Grouped)", "Government Branch", "Funding Instrument",
-    "Trade Agreement", "Lot Type", "published_dayofweek", "Source System"]
+    "Trade Agreement", "Lot Type", "published_dayofweek", "Source System", "previous_attempt"]
 
 FEATURE_SETS = {
     "original_5": (ORIGINAL_NUMERIC, ORIGINAL_CATEGORICAL),
