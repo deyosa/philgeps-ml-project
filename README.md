@@ -72,6 +72,9 @@ The project runs in four steps, from the repository root:
 | 0 | [`notebooks/00_data_cleaning.ipynb`](notebooks/00_data_cleaning.ipynb): reads the 28 raw files from 2023 Q1 to 2026 Q2, repairs the 2025 Q4 column shift, renames the 2.0 headers, merges everything, and drops exact duplicate rows and `Closed` rows | `data/raw/cleaned_data/PhilGeps_Cleaned.csv` (2,093,210 line items, 1.6 GB). **This is the main dataset.** |
 | 1 | `python scripts/harmonise_cleaned.py` (about 1 minute): adds `Source System`, merges the columns that carry 2026 names (`Procurement Category` → `Business Category`, `Source of Funds` → `Funding Source`, `Delivery Period` → `Contract Duration`, ...), maps 2.0 statuses, `Region` and `Classification` spellings, splits durations, parses dates and amounts | `data/processed/philgeps_cleaned.parquet` (about 220 MB) |
 | 2–4 | Analysis notebooks 01–03 (below) | bid table, models and metrics in `data/processed/` |
+| 5 | [`notebooks/04_project_summary.ipynb`](notebooks/04_project_summary.ipynb): auto-updating summary (problem, methodology, key findings, business applications) built from the outputs of steps 0–4 | the summary itself |
+
+`python scripts/run_pipeline.py` runs steps 1 to 5 in order (about 15 minutes), so the summary always reflects the latest run. Use `--from 03` to start at a later notebook, or `--summary` to refresh only notebook 04.
 
 The cleaned CSV is committed with Git LFS, like the raw files, so `git lfs pull` downloads it and you can start at step 1. Notebook 00 only needs re-running if the raw data changes; it holds all 11 million raw rows in memory at once and needs well over 16 GB of RAM. `data/processed/` is ignored by Git; rebuild it locally with step 1 and the notebooks.
 
@@ -90,8 +93,9 @@ The analytical roadmap runs in three notebooks in [`notebooks/`](notebooks/), wh
 | Notebook | Roadmap steps | Contents |
 |---|---|---|
 | [`01_data_preparation_and_eda.ipynb`](notebooks/01_data_preparation_and_eda.ipynb) | 1–5 | Source inventory and duplicate check, raw layouts, procurement modes and statuses, unit of observation, 2025 Q4 repair check, harmonisation, consolidation, bid-level table with exception log, outcome rule, label coverage, field availability, class balance |
-| [`02_modeling.ipynb`](notebooks/02_modeling.ipynb) | 6 | Random 70/15/15 split of the merged bid table (stratified by outcome and system), baselines, 4 models × 2 feature sets (LT8's original 5, then expanded), calibration, test evaluation, sensitivity with only failed biddings counted as failures |
-| [`03_diagnostics_and_interpretation.ipynb`](notebooks/03_diagnostics_and_interpretation.ipynb) | 7–9 | Out-of-time check (train 2023–2024, test 2025/2026 by system), drift, segment performance, label coverage, permutation importance, budget and classification patterns, review-queue simulation, findings |
+| [`02_modeling.ipynb`](notebooks/02_modeling.ipynb) | 6 | Random 70/15/15 split of the merged bid table (stratified by outcome and system), baselines, 4 models × 2 feature sets (LT8's original 5, then expanded), calibration, test evaluation with confusion matrices (top-10% and 0.5 cutoffs), sensitivity with only failed biddings counted as failures |
+| [`03_diagnostics_and_interpretation.ipynb`](notebooks/03_diagnostics_and_interpretation.ipynb) | 7–9 | Out-of-time check (train 2023–2024, test 2025/2026 by system), drift, segment performance, label coverage, permutation importance, budget and classification patterns, review-queue simulation, findings; saves the diagnostics for notebook 04 |
+| [`04_project_summary.ipynb`](notebooks/04_project_summary.ipynb) | summary | Problem, data funnel, methodology, key findings with charts, review-capacity scenarios and business applications, limitations. No hand-typed results: everything is computed from the saved outputs of 00–03 |
 
 Headline result: gradient boosting on the expanded at-publication features reaches test ROC-AUC 0.77 and PR-AUC 0.50 (random ranking: 0.20). Reviewing the 10% of notices with the highest predicted risk would catch 30% of failed or cancelled procurements, at 3.0 times the random hit rate. Counting only failed biddings (Cancelled left out) gives ROC-AUC 0.83.
 
