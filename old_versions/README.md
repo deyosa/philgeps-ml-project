@@ -10,5 +10,6 @@ These notebooks are **superseded** and kept only as a record of earlier work. Th
 | `philgeps_dataset_initial_analysis.ipynb` | johnlagac | `notebooks/01_data_preparation_and_eda.ipynb` |
 | `philgeps_dataset_initial_analysis_updated.ipynb` | johnlagac | `notebooks/01_data_preparation_and_eda.ipynb` |
 | `2.0 and 1.5 Data Exploration.ipynb` | Diluni_Peiris | `notebooks/00_data_cleaning.ipynb` and `notebooks/01_data_preparation_and_eda.ipynb` |
+| `2.0 and 1.5 Data Exploration_Cleaned.ipynb` | Diluni_Peiris | `notebooks/00_data_cleaning.ipynb` and `notebooks/01_data_preparation_and_eda.ipynb` |
 
 The current process is described in the repository [README](../README.md).
