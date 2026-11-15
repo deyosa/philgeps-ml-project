@@ -33,7 +33,9 @@ def find_root() -> Path:
 ROOT = find_root()
 RAW = ROOT / "data" / "raw"
 PROCESSED = ROOT / "data" / "processed"
-COMBINED = PROCESSED / "philgeps_combined.parquet"
+# Main input: the cleaned CSV from notebook 00, harmonised by scripts/harmonise_cleaned.py.
+CLEANED_CSV = RAW / "cleaned_data" / "PhilGeps_Cleaned.csv"
+CLEANED = PROCESSED / "philgeps_cleaned.parquet"
 BIDS = PROCESSED / "bids_public_bidding.parquet"
 EXCEPTIONS = PROCESSED / "bids_public_bidding_exceptions.csv"
 MODELS = PROCESSED / "models"
@@ -42,7 +44,8 @@ SPLITS = PROCESSED / "split_assignment.parquet"
 RANDOM_STATE = 42
 KEY = ["Source System", "Bid Reference No."]
 
-# Study window: 2023 Q1 to 2026 Q2 (Source Quarter of the raw file). 2026 Q3 is left out.
+# Study window: the raw files from 2023 Q1 to 2026 Q2. Notebook 00 reads only these files,
+# so every row of the cleaned file is in the window; 2026 Q3 is left out.
 STUDY_QUARTERS = [f"{y}Q{q}" for y in range(2023, 2027) for q in range(1, 5) if (y, q) <= (2026, 2)]
 
 # --------------------------------------------------------------------------
@@ -83,7 +86,7 @@ def target_failed_only(status: pd.Series) -> pd.Series:
 # Bid-level table
 # --------------------------------------------------------------------------
 ITEM_COLUMNS = [
-    "Source System", "Source Quarter", "Bid Reference No.", "Bid Notice Status",
+    "Source System", "Bid Reference No.", "Bid Notice Status",
     "Approved Budget of the Contract", "Published Date", "Closing Date",
     "Contract Duration", "Calendar Type", "Business Category", "Funding Source",
     "Funding Instrument", "Trade Agreement", "Region", "Classification",
@@ -97,14 +100,11 @@ STRICT_FIELDS = ["Business Category", "Region", "Classification"]
 DAYS_PER_UNIT = {"Day/s": 1, "Month/s": 30, "Year/s": 365}
 
 
-STUDY_FILTER = [("Source Quarter", "in", STUDY_QUARTERS)]
-
-
 def load_public_bidding_items(columns: list[str] | None = None) -> pd.DataFrame:
-    """Public Bidding line items from the study window (filters applied while reading)."""
+    """Public Bidding line items from the cleaned file (filter applied while reading)."""
     columns = columns or ITEM_COLUMNS
-    table = pq.read_table(COMBINED, columns=columns,
-                          filters=[("Procurement Mode (Grouped)", "=", "Public Bidding")] + STUDY_FILTER)
+    table = pq.read_table(CLEANED, columns=columns,
+                          filters=[("Procurement Mode (Grouped)", "=", "Public Bidding")])
     text = [c for c in columns if str(table.schema.field(c).type) == "string" and c != "Bid Reference No."]
     return table.to_pandas(categories=text)
 
@@ -127,7 +127,6 @@ def build_bid_table(items: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
 
     g = items.groupby(KEY, observed=True, sort=False)
     bids = g.agg(
-        source_quarter=("Source Quarter", "first"),
         budget_min=("Approved Budget of the Contract", "min"),
         budget_max=("Approved Budget of the Contract", "max"),
         published_min=("Published Date", "min"),
@@ -155,6 +154,9 @@ def build_bid_table(items: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
 
     bids = bids.reset_index()
     bids = bids[~bids["status"].isin(REMOVED_STATUSES)].reset_index(drop=True)
+    pub = bids["published_min"]
+    bids["published_quarter"] = (pub.dt.year.astype("Int64").astype("string") + "Q"
+                                 + pub.dt.quarter.astype("Int64").astype("string"))
 
     # Quality rules -> exceptions log.
     reasons = pd.Series("", index=bids.index)
@@ -168,7 +170,7 @@ def build_bid_table(items: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     for c in STRICT_FIELDS:
         flag(bids[c + " (versions)"] > 1, f"more than one {c}")
     excluded = reasons != ""
-    exceptions = bids.loc[excluded, KEY + ["status", "source_quarter"]].assign(reason=reasons[excluded])
+    exceptions = bids.loc[excluded, KEY + ["status", "published_quarter"]].assign(reason=reasons[excluded])
     bids = bids.loc[~excluded].copy()
 
     # Features available at publication.
@@ -188,7 +190,7 @@ def build_bid_table(items: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     bids["Target_Failed"] = target_failed(bids["status"])
     bids["Target_Failed_Only"] = target_failed_only(bids["status"])
 
-    keep = (KEY + ["source_quarter", "status", "Target_Failed", "Target_Failed_Only",
+    keep = (KEY + ["published_quarter", "status", "Target_Failed", "Target_Failed_Only",
                    "approved_budget", "log_approved_budget", "published_date", "published_year",
                    "published_month", "published_dayofweek", "closing", "bidding_window_days",
                    "n_line_items", "log_n_line_items", "contract_duration_days",

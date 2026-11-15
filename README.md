@@ -5,7 +5,7 @@ The model estimates whether a published procurement notice is likely to end in a
 
 Outcome definition (one record per `Bid Reference No.`): `Target_Failed = 1` when every line item of the bid is `Failed` or every line item is `Cancelled`, and `0` when every line item is `Awarded`. Bids whose status is `Closed` are **removed** from the data. Bids that are `Active`, `Shortlisted`, `Concluded`, missing or conflicting are left unlabelled and excluded from supervised modelling. Only fields that exist at publication are used as predictors; award and contract fields are excluded.
 
-Study window: **2023 Q1 to 2026 Q2** (by source quarter). The 2026 Q3 files are in `data/raw/` and in the combined file, but the analysis notebooks filter them out (`STUDY_QUARTERS` in [`notebooks/procurement_failure.py`](notebooks/procurement_failure.py)).
+Study window: **2023 Q1 to 2026 Q2**. The 2026 Q3 files are in `data/raw/`, but the cleaning notebook does not read them.
 
 ## Dataset
 
@@ -63,24 +63,29 @@ df_2026_v15 = pd.read_csv("data/raw/1.5_2026_Q1.csv", **cp1252, **kw)
 df_2026_v20 = pd.read_csv("data/raw/2.0_2026_Q1.csv", **kw)
 ```
 
-## Combined dataset
+## Pipeline
 
-[`scripts/combine_raw.py`](scripts/combine_raw.py) reads the 15 `1.5_*` files and the three `2.0_2026_*` files, repairs the shifted columns in `1.5_2025_Q4.csv`, maps the three column layouts onto the 1.5 (2023–2025) column names, harmonises spelling-only differences (statuses, `Region`, `Classification`, duration units) and writes one Parquet file:
+The project runs in four steps, from the repository root:
 
-```bash
-python scripts/combine_raw.py      # from the repository root; about 15 minutes
-# -> data/processed/philgeps_combined.parquet  (6,059,201 line items, about 420 MB)
-```
+| Step | What | Output |
+|---|---|---|
+| 0 | [`notebooks/00_data_cleaning.ipynb`](notebooks/00_data_cleaning.ipynb): reads the 28 raw files from 2023 Q1 to 2026 Q2, repairs the 2025 Q4 column shift, renames the 2.0 headers, merges everything, and drops exact duplicate rows and `Closed` rows | `data/raw/cleaned_data/PhilGeps_Cleaned.csv` (2,093,210 line items, 1.6 GB). **This is the main dataset.** |
+| 1 | `python scripts/harmonise_cleaned.py` (about 1 minute): adds `Source System`, merges the columns that carry 2026 names (`Procurement Category` → `Business Category`, `Source of Funds` → `Funding Source`, `Delivery Period` → `Contract Duration`, ...), maps 2.0 statuses, `Region` and `Classification` spellings, splits durations, parses dates and amounts | `data/processed/philgeps_cleaned.parquet` (about 220 MB) |
+| 2–4 | Analysis notebooks 01–03 (below) | bid table, models and metrics in `data/processed/` |
 
-Every row keeps `Source System` (`1.5` or `2.0`), `Source File` and `Source Quarter`, so it can be traced back to its raw file. The raw files are never modified. `data/processed/` is ignored by Git; rebuild the file locally instead of committing it.
+The cleaned CSV is committed with Git LFS, like the raw files, so `git lfs pull` downloads it and you can start at step 1. Notebook 00 only needs re-running if the raw data changes; it holds all 11 million raw rows in memory at once and needs well over 16 GB of RAM. `data/processed/` is ignored by Git; rebuild it locally with step 1 and the notebooks.
+
+The exact-duplicate step removes 5,868,193 rows: every row of the twelve `2.0_2023_*` to `2.0_2025_*` files (byte-for-byte copies of the matching `1.5_*` files), plus repeated identical line items within the 1.5 exports. Because a row present in several files is kept once, the cleaned file does not record its file of origin; periods are taken from the publication date. A row belongs to PhilGEPS 2.0 exactly when `Lot Type` is filled, since only the 2.0 layout has that column.
 
 Values that genuinely differ between the systems are left as they are: `Business Category`, `Funding Source` and `Award Notice Status` use different vocabularies in PhilGEPS 2.0. Split by `Source System` before comparing them. The 1.5 and 2.0 exports for 2026 contain different notices (no shared bid references), so both are kept.
 
-Bid-level counts used for modelling (Public Bidding only, 2023 Q1 to 2026 Q2): 1,198,528 bids, of which 568,505 `Closed` bids are removed and 103 more are excluded for data-quality reasons, leaving 629,920. Of these, 615,397 are labelled: 492,282 Awarded (0) and 123,115 Failed or Cancelled (1; 66,250 Failed and 56,865 Cancelled), a 20.0% failure rate. The other 14,523 are unlabelled (`Active`, `Shortlisted`, `Concluded`).
+[`scripts/combine_raw.py`](scripts/combine_raw.py) is an independent cross-check. It builds the line items straight from the raw files, keeping `Source File` and `Source Quarter` (`data/processed/philgeps_combined.parquet`, about 15 minutes). Restricted to 2023 Q1–2026 Q2 with `Closed` rows and exact duplicates removed, it gives the same 2,093,210 line items as the cleaned CSV. Bid by bid, statuses, budgets, dates and categories agree. The two harmonisation steps share their value mappings.
+
+Bid-level counts used for modelling (Public Bidding only, 2023 Q1 to 2026 Q2): the cleaned data holds 630,023 bids (568,505 `Closed` bids are already removed); 102 are excluded for data-quality reasons, leaving 629,921. Of these, 615,398 are labelled: 492,283 Awarded (0) and 123,115 Failed or Cancelled (1; 66,250 Failed and 56,865 Cancelled), a 20.0% failure rate. The other 14,523 are unlabelled (`Active`, `Shortlisted`, `Concluded`).
 
 ## Analysis notebooks
 
-The analytical roadmap runs in three notebooks in [`notebooks/`](notebooks/), which share their definitions through [`notebooks/procurement_failure.py`](notebooks/procurement_failure.py). Run them in order after `scripts/combine_raw.py`. They write their outputs (the bid table, models and metrics) to `data/processed/`, which Git ignores.
+The analytical roadmap runs in three notebooks in [`notebooks/`](notebooks/), which share their definitions through [`notebooks/procurement_failure.py`](notebooks/procurement_failure.py). Run them in order after steps 0 and 1 above; they read `data/processed/philgeps_cleaned.parquet`. They write their outputs (the bid table, models and metrics) to `data/processed/`, which Git ignores.
 
 | Notebook | Roadmap steps | Contents |
 |---|---|---|
@@ -88,11 +93,9 @@ The analytical roadmap runs in three notebooks in [`notebooks/`](notebooks/), wh
 | [`02_modeling.ipynb`](notebooks/02_modeling.ipynb) | 6 | Random 70/15/15 split of the merged bid table (stratified by outcome and system), baselines, 4 models × 2 feature sets (LT8's original 5, then expanded), calibration, test evaluation, sensitivity with only failed biddings counted as failures |
 | [`03_diagnostics_and_interpretation.ipynb`](notebooks/03_diagnostics_and_interpretation.ipynb) | 7–9 | Out-of-time check (train 2023–2024, test 2025/2026 by system), drift, segment performance, label coverage, permutation importance, budget and classification patterns, review-queue simulation, findings |
 
-Headline result: gradient boosting on the expanded at-publication features reaches test ROC-AUC 0.79 and PR-AUC 0.52 (random ranking: 0.20). Reviewing the 10% of notices with the highest predicted risk would catch 31% of failed or cancelled procurements, at 3.1 times the random hit rate. Counting only failed biddings (Cancelled left out) gives ROC-AUC 0.84.
+Headline result: gradient boosting on the expanded at-publication features reaches test ROC-AUC 0.77 and PR-AUC 0.50 (random ranking: 0.20). Reviewing the 10% of notices with the highest predicted risk would catch 30% of failed or cancelled procurements, at 3.0 times the random hit rate. Counting only failed biddings (Cancelled left out) gives ROC-AUC 0.83.
 
 ## Other notebooks
 
-- [`philgeps_dataset_initial_analysis_updated.ipynb`](philgeps_dataset_initial_analysis_updated.ipynb): loads the combined dataset, profiles every field, defines the bid-level outcome (how ongoing, closed and cancelled notices are handled, class balance by system and year), classifies fields by availability at publication, and charts every low-cardinality field. Run `scripts/combine_raw.py` first.
-- [`LT8-ML_Govt_Bidding_Documented.ipynb`](LT8-ML_Govt_Bidding_Documented.ipynb): the original run of the roadmap on the earlier 14-file set (2023 Q1 to 2026 Q2), kept as a record. Its header gives the procurement-failure framing and answers the reviewer's questions with current numbers, and its last cell points to the `notebooks/` series.
-- [`philgeps_dataset_initial_analysis.ipynb`](philgeps_dataset_initial_analysis.ipynb): earlier version of the initial analysis, kept for reference. It reads the raw CSVs directly with the old file names.
-- [`data_exploration/2.0 and 1.5 Data Exploration.ipynb`](data_exploration/2.0%20and%201.5%20Data%20Exploration.ipynb): exploration pipeline on the combined dataset: source summary, exact-duplicate rows, missing values, count plots of selected fields (saved to `data/processed/figures/`), and data-scoping notes.
+- [`LT8-ML_Govt_Bidding_Documented.ipynb`](LT8-ML_Govt_Bidding_Documented.ipynb): the original run of the roadmap on the earlier 14-file set, kept as a record. Notebooks 01–03 re-run it and cite its sections. Its header and last cell describe the current process and give the current numbers; the cells in between are the original run.
+- [`old_versions/`](old_versions/): superseded notebooks (the initial dataset analyses and the first data-exploration pipeline), archived read-only. They are not part of the pipeline and their numbers are out of date; see [`old_versions/README.md`](old_versions/README.md).
