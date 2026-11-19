@@ -1,9 +1,9 @@
 # philgeps-ml-project
-Predicting the likelihood of procurement failure for PhilGEPS public biddings: a notice-level risk score, estimated from information available when the bid notice is published.
+Predicting government procurement failure on PhilGEPS: at the time a bid notice is posted, how likely is it that the procurement will **fail or be cancelled** instead of being **awarded**?
 
-The model estimates whether a published procurement notice is likely to end in a **failed bidding or a cancellation** rather than an award. It is intended for risk screening and review prioritisation by agencies, oversight bodies and analysts. It is **not** a model of whether a particular supplier will win a contract, and it does not recommend which bids suppliers should pursue.
+An early warning lets procuring entities fix a bid (budget, timeline, specifications) before it fails, which avoids re-bidding delays and wasted procurement effort. The model is intended for risk screening and review prioritisation. It is **not** a model of whether a particular supplier will win a contract.
 
-Outcome definition (one record per `Bid Reference No.`): `Target_Failed = 1` when every line item of the bid is `Failed` or every line item is `Cancelled`, and `0` when every line item is `Awarded`. Bids whose status is `Closed` are **removed** from the data. Bids that are `Active`, `Shortlisted`, `Concluded`, missing or conflicting are left unlabelled and excluded from supervised modelling. Bids published in 2025 Q3–Q4 are also left out of training and evaluation: award records for those quarters are largely missing from the PhilGEPS 1.5 exports, so their labels lean towards cancellations. Only fields that exist at publication are used as predictors; award and contract fields are excluded.
+Outcome definition (one record per bid): `1` when the bid ended `Failed` or `Cancelled`, `0` when it was `Awarded`. Bids whose status is `Closed` are removed during cleaning, and bids still `Active`, `Shortlisted`, `Concluded` or `Published` have no outcome yet and are left out. All procurement modes are included. Award and awardee fields are excluded from the predictors, because they are only filled in after the outcome.
 
 Study window: **2023 Q1 to 2026 Q2**. The 2026 Q3 files are in `data/raw/`, but the cleaning notebook does not read them.
 
@@ -65,43 +65,53 @@ df_2026_v20 = pd.read_csv("data/raw/2.0_2026_Q1.csv", **kw)
 
 ## Pipeline
 
-The project runs in four steps, from the repository root:
+The project runs in two notebooks in [`notebooks/`](notebooks/):
 
-| Step | What | Output |
+| Step | Notebook | Output |
 |---|---|---|
-| 0 | [`notebooks/00_data_cleaning.ipynb`](notebooks/00_data_cleaning.ipynb): reads the 28 raw files from 2023 Q1 to 2026 Q2, repairs the 2025 Q4 column shift, renames the 2.0 headers, merges everything, and drops exact duplicate rows and `Closed` rows | `data/raw/cleaned_data/PhilGeps_Cleaned.csv` (2,093,210 line items, 1.6 GB). **This is the main dataset.** |
-| 1 | `python scripts/harmonise_cleaned.py` (about 1 minute): repairs 2025 Q4 text that notebook 00 decodes as Latin-1 instead of Windows-1252, adds `Source System`, merges the columns that carry 2026 names (`Procurement Category` → `Business Category`, `Source of Funds` → `Funding Source`, `Delivery Period` → `Contract Duration`, ...), maps 2.0 statuses, `Region` and `Classification` spellings, splits durations, parses dates and amounts | `data/processed/philgeps_cleaned.parquet` (about 220 MB) |
-| 2–4 | Analysis notebooks 01–03 (below) | bid table, models and metrics in `data/processed/` |
-| 5 | [`notebooks/04_project_summary.ipynb`](notebooks/04_project_summary.ipynb): auto-updating summary (problem, methodology, key findings, business applications) built from the outputs of steps 0–4 | the summary itself |
+| 0 | [`00_data_cleaning.ipynb`](notebooks/00_data_cleaning.ipynb): reads the 28 raw files from 2023 Q1 to 2026 Q2, repairs the 2025 Q4 column shift, renames the 2.0 headers, merges everything, and drops exact duplicate rows and `Closed` rows | `data/raw/cleaned_data/PhilGeps_Cleaned.csv` (2,093,210 line items, 1.6 GB). **This is the main dataset.** |
+| 1 | [`05_final_modeling.ipynb`](notebooks/05_final_modeling.ipynb): **the final model.** Merges the 1.5 and 2.0 column layouts, keeps bids with a final outcome, builds one row per bid, removes leaky fields, engineers features, tunes hyperparameters with 5-fold cross-validation, and trains 7 algorithms in 3 scenarios, followed by feature importance and a look at the drivers of failure | models, metrics and charts in the notebook |
 
-`python scripts/run_pipeline.py` runs steps 1 to 5 in order (about 15 minutes), so the summary always reflects the latest run. Use `--from 03` to start at a later notebook, or `--summary` to refresh only notebook 04.
+The cleaned CSV is committed with Git LFS, like the raw files, so `git lfs pull` downloads it and you can go straight to notebook 05. Notebook 00 only needs re-running if the raw data changes; it holds all 11 million raw rows in memory at once and needs well over 16 GB of RAM.
 
-The cleaned CSV is committed with Git LFS, like the raw files, so `git lfs pull` downloads it and you can start at step 1. Notebook 00 only needs re-running if the raw data changes; it holds all 11 million raw rows in memory at once and needs well over 16 GB of RAM. `data/processed/` is ignored by Git; rebuild it locally with step 1 and the notebooks.
+Notebook 05 needs `xgboost` and `imbalanced-learn` besides the usual scientific Python stack. A full run takes about 1 to 1.5 hours and about 8 GB of free RAM.
 
-The exact-duplicate step removes 5,868,193 rows: every row of the twelve `2.0_2023_*` to `2.0_2025_*` files (byte-for-byte copies of the matching `1.5_*` files), plus repeated identical line items within the 1.5 exports. Because a row present in several files is kept once, the cleaned file does not record its file of origin; periods are taken from the publication date. A row belongs to PhilGEPS 2.0 exactly when `Lot Type` is filled, since only the 2.0 layout has that column.
+To download only what notebook 05 needs, and save Git LFS bandwidth:
 
-Values that genuinely differ between the systems are left as they are: `Business Category`, `Funding Source` and `Award Notice Status` use different vocabularies in PhilGEPS 2.0. Split by `Source System` before comparing them. The 1.5 and 2.0 exports for 2026 contain different notices (no shared bid references), so both are kept.
+```bash
+GIT_LFS_SKIP_SMUDGE=1 git clone https://github.com/deyosa/philgeps-ml-project.git
+cd philgeps-ml-project
+git lfs pull --include="data/raw/cleaned_data/*"
+```
 
-[`data/reference/public_bidding_notices_per_year.csv`](data/reference/public_bidding_notices_per_year.csv) holds the yearly number of Public Bidding notices **including** those that end `Closed`. The cleaned data cannot provide it, since Closed rows are removed. Notebook 04 sizes its review-capacity scenarios on it and refreshes it whenever `data/processed/philgeps_combined.parquet` (below) exists.
+The exact-duplicate step in notebook 00 removes 5,868,193 rows: every row of the twelve `2.0_2023_*` to `2.0_2025_*` files (byte-for-byte copies of the matching `1.5_*` files), plus repeated identical line items within the 1.5 exports.
 
-[`scripts/combine_raw.py`](scripts/combine_raw.py) is an independent cross-check. It builds the line items straight from the raw files, keeping `Source File` and `Source Quarter` (`data/processed/philgeps_combined.parquet`, about 15 minutes). Restricted to 2023 Q1–2026 Q2 with `Closed` rows and exact duplicates removed, it gives the same 2,093,210 line items as the cleaned CSV. Bid by bid, statuses, budgets, dates and categories agree. The two harmonisation steps share their value mappings.
+## Final model
 
-Bid-level counts used for modelling (Public Bidding only, 2023 Q1 to 2026 Q2): the cleaned data holds 630,023 bids (568,505 `Closed` bids are already removed); 102 are excluded for data-quality reasons, leaving 629,921, of which 615,398 are labelled. Leaving out the 35,178 labelled bids from 2025 Q3–Q4, the modelling population is 580,220: 469,283 Awarded (0) and 110,937 Failed or Cancelled (1; 61,590 Failed and 49,347 Cancelled), a 19.1% failure rate.
+Notebook 05 compares Logistic Regression, Ridge (L2), Lasso (L1), KNN, Random Forest, XGBoost and HistGB in three scenarios:
 
-## Analysis notebooks
-
-The analytical roadmap runs in three notebooks in [`notebooks/`](notebooks/), which share their definitions through [`notebooks/procurement_failure.py`](notebooks/procurement_failure.py). Run them in order after steps 0 and 1 above; they read `data/processed/philgeps_cleaned.parquet`. They write their outputs (the bid table, models and metrics) to `data/processed/`, which Git ignores.
-
-| Notebook | Roadmap steps | Contents |
+| Scenario | Training data | Test data |
 |---|---|---|
-| [`01_data_preparation_and_eda.ipynb`](notebooks/01_data_preparation_and_eda.ipynb) | 1–5 | Source inventory and duplicate check, raw layouts, procurement modes and statuses, unit of observation, 2025 Q4 repair check, harmonisation, consolidation, bid-level table with exception log, outcome rule, label coverage and the 2025 Q3–Q4 exclusion, field availability, class balance, re-advertised notices |
-| [`02_modeling.ipynb`](notebooks/02_modeling.ipynb) | 6 | Random 70/15/15 split of the merged bid table by notice group (re-advertisements stay together; stratified by outcome and system), baselines, 4 models × 2 feature sets (LT8's original 5, then expanded), calibration, test evaluation with confusion matrices (top-10% and 0.5 cutoffs), sensitivity with only failed biddings counted as failures, and with 2025 Q3–Q4 added back |
-| [`03_diagnostics_and_interpretation.ipynb`](notebooks/03_diagnostics_and_interpretation.ipynb) | 7–9 | Out-of-time check (train 2023–2024, test 2025/2026 by system), drift, segment performance, label coverage, permutation importance, budget and classification patterns, review-queue simulation, findings; saves the diagnostics for notebook 04 |
-| [`04_project_summary.ipynb`](notebooks/04_project_summary.ipynb) | summary | Problem, data funnel, methodology, key findings with charts, review-capacity scenarios and business applications, limitations. No hand-typed results: everything is computed from the saved outputs of 00–03 |
+| All features (unbalanced) | Random 80% of bids (1.28M), stratified by outcome; no bid in both sets | Remaining 20% (320k bids) |
+| Undersampling 60/40 | Same training bids, undersampled to 60% Awarded / 40% Failed inside the pipeline | Same test set |
+| Time-based split | Bids published before 1 July 2025 | Bids from 1 July 2025 to June 2026 |
 
-Headline result: gradient boosting on 19 at-publication features, including the re-advertisement history of each notice, reaches test ROC-AUC 0.77 and PR-AUC 0.52 (random ranking: 0.19). Reviewing the 10% of notices with the highest predicted risk would catch 32% of failed or cancelled procurements, at 3.2 times the random hit rate. Counting only failed biddings (Cancelled left out) gives ROC-AUC 0.84.
+Results (test set, positive class = Failed or Cancelled):
 
-## Other notebooks
+- **Best model: XGBoost** (`max_depth` = 10) in the main scenario, with **PR AUC 0.658** (no-skill baseline 0.151) and **ROC AUC 0.869**. At a 0.5 threshold, precision is 0.835 and recall 0.362; the F1-maximising threshold (about 0.28) gives precision 0.584 and recall 0.566.
+- The tree ensembles beat the logistic regressions (PR AUC about 0.577) and KNN (0.532). The penalty makes no practical difference to the logistic regressions.
+- **Undersampling** does not improve any model; it only shifts the predicted probabilities.
+- **Over time** performance drops: on the time-based split XGBoost reaches PR AUC 0.561 and ROC AUC 0.793, and Random Forest is best (0.589 / 0.806). These numbers are the more realistic estimate for deployment.
+- **Key drivers:** the procuring entity's track record (its historical failure rate), then procurement mode, location, whether the notice has a bidding window, and very small or very large budgets.
 
-- [`LT8-ML_Govt_Bidding_Documented.ipynb`](LT8-ML_Govt_Bidding_Documented.ipynb): the original run of the roadmap on the earlier 14-file set, kept as a record. Notebooks 01–03 re-run it and cite its sections. Its header and last cell describe the current process and give the current numbers; the cells in between are the original run.
-- [`old_versions/`](old_versions/): superseded notebooks (the initial dataset analyses and the first data-exploration pipeline), archived read-only. They are not part of the pipeline and their numbers are out of date; see [`old_versions/README.md`](old_versions/README.md).
+## Data caveats
+
+Found while building the earlier version of the project (see [`old_versions/README.md`](old_versions/README.md)); they apply to the cleaned dataset that notebook 05 uses:
+
+- In the PhilGEPS 1.5 exports for **2025 Q3–Q4**, award records are largely missing. Labelled bids from those quarters lean towards cancellations, which affects the time-based test period (from July 2025). Re-downloading the files from PhilGEPS gave identical files.
+- Notebook 00 decodes `1.5_2025_Q4.csv` as Latin-1 instead of Windows-1252, so a few thousand notice titles from 2025 Q4 contain garbled characters (for example `Multi\x96Purpose`).
+- A failed or cancelled procurement is often re-advertised under a new bid reference with the same procuring entity, title and budget. A random split by bid can put the original and the re-advertisement on different sides.
+
+## Archive
+
+Earlier versions are kept read-only in [`old_versions/`](old_versions/): the original documented run (`LT8-ML_Govt_Bidding_Documented.ipynb`), the initial dataset analyses, the first data-exploration notebooks, and the second version of the project, the Public Bidding pipeline (`public_bidding_pipeline/`). They are not part of the current project and their numbers are out of date; see [`old_versions/README.md`](old_versions/README.md).
